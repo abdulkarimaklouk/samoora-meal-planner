@@ -87,6 +87,7 @@ const state = {
   aheadSheet: null,
   aheadSheetFocus: false,
   calendarPage: 0,
+  customMenuFile: null,
 };
 
 const app = document.querySelector("#app");
@@ -205,6 +206,15 @@ function exportPlanCsv() {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function downloadMenuTemplate() {
+  const link = document.createElement("a");
+  link.href = asset("./data/samoora_custom_menu_template.csv");
+  link.download = "samoora_custom_menu_template.csv";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 
 function dedupePlans(plans) {
@@ -1120,28 +1130,30 @@ function weightScreen({ weekly = false } = {}) {
 
 function renderOnboard() {
   const step = state.onboardStep;
-  const titles = ["Let's start with you", "Your fasting clock", "What do you feel like eating?"];
-  const poses = ["privacy", "fasting", "notebook"];
+  const titles = ["Let's start with you", "Your fasting clock", "What do you feel like eating?", "Your Menu"];
+  const poses = ["privacy", "fasting", "notebook", "notebook"];
   const bubbles = [
     privacyBlock(),
     `<p>The clock is yours. You can change it any day.</p>${privacyBlock()}`,
     `<p>Set the day the way you like it. Calories stay under a whole number, and protein, carbs, and fat each have a range. You can change this whenever you want.</p>`,
+    "<p>You can add your own meals whenever you like. This step is optional, and you can skip it for now.</p>",
   ];
   const brand = step === 1
     ? `<div class="hero-logo"><img src="${asset("./assets/logo.png")}" alt="Samoora Meal Planner"><p class="love">Made with Love by Mohammed</p></div>`
     : `<header class="top"><img class="logo" src="${asset("./assets/logo.png")}" alt="Samoora Meal Planner"></header>`;
   return `${brand}
-    <main class="wrap"><div class="steps">${[1, 2, 3].map((item) => `<span class="${item <= step ? "on" : ""}"></span>`).join("")}</div>
+    <main class="wrap"><div class="steps">${[1, 2, 3, 4].map((item) => `<span class="${item <= step ? "on" : ""}"></span>`).join("")}</div>
     <h1>${titles[step - 1]}</h1>
     ${host(poses[step - 1], bubbles[step - 1])}
     <div id="step-focus">
     ${step === 1 ? bodyFields({ weight: true }) : ""}
     ${step === 2 ? fastingFields() : ""}
     ${step === 3 ? presetEditor() : ""}
+    ${step === 4 ? renderMenuManager() : ""}
     </div>
     <div class="row" style="margin-top:16px">
       ${step > 1 ? `<button class="ghost" type="button" data-action="back">Back</button>` : ""}
-      <button class="primary" type="button" data-action="next">${step === 3 ? "Save and start" : "Continue"}</button>
+      <button class="primary" type="button" data-action="next">${step === 4 ? "Save and start" : "Continue"}</button>
     </div>
     ${footer()}</main>`;
 }
@@ -1584,6 +1596,21 @@ function renderHistory() {
     ${footer()}</main>`;
 }
 
+function renderMenuManager() {
+    const filename = state.customMenuFile?.name || "No file selected.";
+
+  return `<div class="card">
+    <p class="quiet">Download the CSV template, add your meals, then select your completed file here.</p>
+    <div class="row">
+      <button class="primary" type="button" data-action="download-menu-template">Download template</button>
+      <button class="ghost" type="button" data-action="upload-menu">Upload CSV</button>
+      <input id="customMenuFile" type="file" accept=".csv,text/csv" hidden>
+    </div>
+    <p class="quiet" aria-live="polite">${esc(filename)}</p>
+  </div>`;
+
+}
+
 function renderPrefs() {
   return `${header()}<main class="wrap">${backBar()}<h1>Preferences</h1>
     ${host("notebook", "<p>Change any of this. It saves as you go, and it stays on this device.</p>")}
@@ -1594,6 +1621,7 @@ function renderPrefs() {
     </div>
     <h2 style="margin-top:18px">Presets</h2>
     ${presetEditor()}
+    <h2 style="margin-top:18px">Your Menu</h2>${renderMenuManager()}
     ${footer()}</main>`;
 }
 
@@ -1721,6 +1749,8 @@ function onClick(event) {
     render();
   }
   if (action === "next") continueOnboard();
+  if (action === "download-menu-template") downloadMenuTemplate();
+  if (action === "upload-menu") document.getElementById("customMenuFile")?.click();
   if (action === "fast-on") {
     state.fasting.on = button.dataset.value === "1";
     render();
@@ -2129,8 +2159,13 @@ function continueOnboard() {
     state.scrollTo = "#step-focus";
     return render();
   }
-  clampCalMax();
-  savePresets(state.presets, state.activePresetId);
+  if (state.onboardStep === 3) {
+    clampCalMax();
+    savePresets(state.presets, state.activePresetId);
+    state.onboardStep = 4;
+    state.scrollTo = "#step-focus";
+    return render();
+  }
   saveOnboarded(true);
   state.onboarded = true;
   state.screen = "planner";
@@ -2522,10 +2557,21 @@ async function boot() {
 
 app.addEventListener("click", onClick);
 app.addEventListener("input", onInput);
-app.addEventListener("change", (event) => {
+app.addEventListener("change",  (event) => {
   const input = event.target;
-  if (input.dataset.fastHours || input.dataset.window || input.dataset.level) render();
+
+  if (input.id === "customMenuFile") {
+    state.customMenuFile = input.files?.[0] || null;
+    render();
+    return;
+  }
+
+  if (input.dataset.fastHours || input.dataset.window || input.dataset.level) {
+    render();
+  }
 });
+
+
 app.addEventListener("pointerdown", (event) => {
   const knob = event.target.closest(".knob");
   if (!knob) return;
