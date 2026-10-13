@@ -10,6 +10,10 @@ const KEYS = {
   onboarded: "samoora.onboarded",
 };
 
+const CUSTOM_MENU_DB_NAME = "samoora-custom-menu";
+const CUSTOM_MENU_STORE = "database";
+const CUSTOM_MENU_KEY = "active";
+
 export function read(key, fallback) {
   try {
     const raw = localStorage.getItem(KEYS[key]);
@@ -96,4 +100,77 @@ export function saveCheer(index) {
 
 export function saveOnboarded(done) {
   write("onboarded", done);
+}
+
+function openCustomMenuDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!globalThis.indexedDB) {
+      reject(new Error("This browser does not support local menu storage."));
+      return;
+    }
+    const request = globalThis.indexedDB.open(CUSTOM_MENU_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(CUSTOM_MENU_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not open local menu storage."));
+    request.onblocked = () => reject(new Error("Local menu storage is busy. Close another Samoora tab and try again."));
+  });
+}
+
+export function saveCustomMenuBytes(bytes) {
+  return new Promise(async (resolve, reject) => {
+    let database;
+    try {
+      database = await openCustomMenuDatabase();
+      const transaction = database.transaction(CUSTOM_MENU_STORE, "readwrite");
+      transaction.objectStore(CUSTOM_MENU_STORE).put(bytes.slice().buffer, CUSTOM_MENU_KEY);
+      transaction.oncomplete = () => {
+        database.close();
+        resolve();
+      };
+      transaction.onerror = () => {
+        const error = transaction.error || new Error("The custom menu could not be saved.");
+        database.close();
+        reject(error);
+      };
+      transaction.onabort = () => {
+        const error = transaction.error || new Error("The custom menu save was aborted.");
+        database.close();
+        reject(error);
+      };
+    } catch (error) {
+      database?.close();
+      reject(error);
+    }
+  });
+}
+
+export function loadCustomMenuBytes() {
+  return new Promise(async (resolve, reject) => {
+    let database;
+    try {
+      database = await openCustomMenuDatabase();
+      const transaction = database.transaction(CUSTOM_MENU_STORE, "readonly");
+      const request = transaction.objectStore(CUSTOM_MENU_STORE).get(CUSTOM_MENU_KEY);
+      request.onsuccess = () => {
+        const value = request.result;
+        database.close();
+        resolve(value == null ? null : new Uint8Array(value));
+      };
+      request.onerror = () => {
+        const error = request.error || new Error("The saved custom menu could not be read.");
+        database.close();
+        reject(error);
+      };
+      transaction.onabort = () => {
+        const error = transaction.error || new Error("The saved custom menu read was aborted.");
+        database.close();
+        reject(error);
+      };
+    } catch (error) {
+      database?.close();
+      reject(error);
+    }
+  });
 }

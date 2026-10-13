@@ -1,4 +1,4 @@
-import { loadMeals } from "./db.js";
+import { createCustomMenuDatabase, loadCustomMenuMeals, loadMeals } from "./db.js";
 import { fastingStatus, fastReachesTomorrow, formatRemaining } from "./fasting.js";
 import {
   dayTarget,
@@ -12,8 +12,10 @@ import {
 } from "./planner.js";
 import {
   LEVEL_LABELS,
+  loadCustomMenuBytes,
   loadState,
   saveCheer,
+  saveCustomMenuBytes,
   saveFasting,
   saveMealWeights,
   saveOnboarded,
@@ -90,6 +92,9 @@ const state = {
   customMenuFile: null,
   customMenuValidation: null,
   customMenuRows: [],
+  customMenuSave: null,
+  customMenuRestore: null,
+  customMenuDownload: null,
 };
 
 const app = document.querySelector("#app");
@@ -210,13 +215,56 @@ function exportPlanCsv() {
   URL.revokeObjectURL(url);
 }
 
-function downloadMenuTemplate() {
+function downloadCsvText(csv, filename) {
+  const file = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(file);
   const link = document.createElement("a");
-  link.href = asset("./data/samoora_custom_menu_template.csv");
-  link.download = "samoora_custom_menu_template.csv";
+  link.href = url;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function downloadMenuTemplate() {
+  state.customMenuDownload = null;
+  render();
+  try {
+    const bytes = await loadCustomMenuBytes();
+    if (!bytes) {
+      const link = document.createElement("a");
+      link.href = asset("./data/samoora_custom_menu_template.csv");
+      link.download = "samoora_custom_menu_template.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      return;
+    }
+
+    const response = await fetch(asset("./data/samoora_custom_menu_template.csv"));
+    if (!response.ok) throw new Error("The custom menu template could not be loaded.");
+    const template = await response.text();
+    const meals = await loadCustomMenuMeals(bytes);
+    const rows = meals.map((meal) => [
+      meal.name,
+      meal.chef,
+      meal.categories,
+      meal.url,
+      meal.calories,
+      meal.protein,
+      meal.carbs,
+      meal.fat,
+    ]);
+    const csv = `${template.trimEnd()}\r\n${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
+    downloadCsvText(csv, "samoora_custom_menu.csv");
+  } catch (error) {
+    state.customMenuDownload = {
+      status: "error",
+      message: `The saved custom menu could not be downloaded: ${error instanceof Error ? error.message : "it could not be read."}`,
+    };
+    render();
+  }
 }
 
 const CUSTOM_MENU_COLUMNS = ["name", "chef", "categories", "cookunity_url", "calories", "protein", "carbs", "fat"];
@@ -404,6 +452,31 @@ async function validateCustomMenuFile() {
     state.customMenuValidation = {
       ok: false,
       errors: [error instanceof Error ? error.message : "The CSV could not be read or parsed."],
+    };
+  }
+  render();
+}
+
+async function saveCustomMenu() {
+  if (state.customMenuSave?.status === "saving") return;
+  if (!state.customMenuValidation?.ok || !state.customMenuRows.length) return;
+  const file = state.customMenuFile;
+  const meals = state.customMenuRows;
+  state.customMenuSave = { status: "saving", message: "Saving your menu..." };
+  render();
+  try {
+    const bytes = await createCustomMenuDatabase(meals);
+    await saveCustomMenuBytes(bytes);
+    if (state.customMenuFile !== file) return;
+    state.customMenuSave = {
+      status: "success",
+      message: `Saved ${meals.length} meal${meals.length === 1 ? "" : "s"}.`,
+    };
+  } catch (error) {
+    if (state.customMenuFile !== file) return;
+    state.customMenuSave = {
+      status: "error",
+      message: error instanceof Error ? error.message : "The custom menu could not be saved.",
     };
   }
   render();
@@ -1791,21 +1864,32 @@ function renderHistory() {
 function renderMenuManager() {
   const filename = state.customMenuFile?.name || "No file selected.";
   const validation = state.customMenuValidation;
+  const save = state.customMenuSave;
+  const saving = save?.status === "saving";
+  const restore = state.customMenuRestore;
   const feedback = validation?.ok
     ? `<p class="quiet" aria-live="polite">Validated ${validation.count} meal row${validation.count === 1 ? "" : "s"}.</p>`
     : validation
       ? `<div class="warn" aria-live="polite"><p>We found a few things to fix:</p><ul>${validation.errors.map((error) => `<li>${esc(error)}</li>`).join("")}</ul></div>`
       : "";
   return `<section class="card">
-    <h2>Your Menu</h2>
     <p class="quiet">Download the CSV template, add your meals, then select your completed file here.</p>
     <div class="row">
       <button class="primary" type="button" data-action="download-menu-template">Download template</button>
-      <button class="ghost" type="button" data-action="upload-menu">Upload CSV</button>
-      <input id="customMenuFile" type="file" accept=".csv,text/csv" hidden>
+      <button class="ghost" type="button" data-action="upload-menu" ${saving ? "disabled" : ""}>Upload CSV</button>
+      <input id="customMenuFile" type="file" accept=".csv,text/csv" ${saving ? "disabled" : ""} hidden>
     </div>
     <p class="quiet" aria-live="polite">${esc(filename)}</p>
     ${feedback}
+    ${save?.status === "saving" ? `<p class="quiet" aria-live="polite">${esc(save.message)}</p>` : ""}
+    ${validation?.ok && state.customMenuRows.length
+      ? `<button class="primary" type="button" data-action="save-custom-menu" ${saving ? "disabled" : ""}>${saving ? "Saving..." : "Use this menu"}</button>`
+      : ""}
+    ${save?.status === "success" ? `<p class="quiet" aria-live="polite">${esc(save.message)}</p>` : ""}
+    ${save?.status === "error" ? `<p class="warn" aria-live="polite">${esc(save.message)}</p>` : ""}
+    ${restore?.status === "success" ? `<p class="quiet" aria-live="polite">${esc(restore.message)}</p>` : ""}
+    ${restore?.status === "error" ? `<p class="warn" aria-live="polite">${esc(restore.message)}</p>` : ""}
+    ${state.customMenuDownload?.status === "error" ? `<p class="warn" aria-live="polite">${esc(state.customMenuDownload.message)}</p>` : ""}
   </section>`;
 }
 
@@ -1949,6 +2033,7 @@ function onClick(event) {
   if (action === "next") continueOnboard();
   if (action === "download-menu-template") downloadMenuTemplate();
   if (action === "upload-menu") document.getElementById("customMenuFile")?.click();
+  if (action === "save-custom-menu") saveCustomMenu();
   if (action === "fast-on") {
     state.fasting.on = button.dataset.value === "1";
     render();
@@ -2721,6 +2806,22 @@ async function boot() {
       savePresets(state.presets, state.activePresetId);
     }
     render();
+    try {
+      const savedCustomMenuBytes = await loadCustomMenuBytes();
+      if (savedCustomMenuBytes) {
+        const savedMeals = await loadCustomMenuMeals(savedCustomMenuBytes);
+        state.customMenuRestore = {
+          status: "success",
+          message: `Saved menu: ${savedMeals.length} meal${savedMeals.length === 1 ? "" : "s"} on this device.`,
+        };
+      }
+    } catch (error) {
+      state.customMenuRestore = {
+        status: "error",
+        message: `The saved custom menu could not be restored: ${error instanceof Error ? error.message : "the database is invalid."}`,
+      };
+    }
+    render();
     state.meals = await loadMeals();
     restoreToday();
     state.scrollTo = "top";
@@ -2759,9 +2860,12 @@ app.addEventListener("change",  (event) => {
   const input = event.target;
 
   if (input.id === "customMenuFile") {
+    if (state.customMenuSave?.status === "saving") return;
     state.customMenuFile = input.files?.[0] || null;
     state.customMenuRows = [];
     state.customMenuValidation = null;
+    state.customMenuSave = null;
+    state.customMenuRestore = null;
     render();
     validateCustomMenuFile();
     return;

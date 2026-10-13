@@ -35,3 +35,78 @@ export async function loadMeals() {
     return meal;
   });
 }
+
+async function initDatabase() {
+  const initSqlJs = globalThis.initSqlJs;
+  if (!initSqlJs) throw new Error("SQLite could not start.");
+  return initSqlJs({
+    locateFile: (file) => `./vendor/${file}?v=${globalThis.SAMOORA_UI || ""}`,
+  });
+}
+
+export async function loadCustomMenuMeals(bytes) {
+  const SQL = await initDatabase();
+  let db;
+  try {
+    db = new SQL.Database(bytes);
+    const result = db.exec(`
+      SELECT id, name, chef, categories, url, calories, protein, carbs, fat
+      FROM meals
+      ORDER BY name
+    `);
+    if (!result.length) return [];
+    const { columns, values } = result[0];
+    return values.map((row) => {
+      const meal = {};
+      columns.forEach((column, index) => {
+        meal[column] = row[index];
+      });
+      return meal;
+    });
+  } finally {
+    db?.close();
+  }
+}
+
+export async function createCustomMenuDatabase(meals) {
+  const SQL = await initDatabase();
+  let db;
+  let statement;
+  try {
+    db = new SQL.Database();
+    db.run(`
+      CREATE TABLE meals (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        chef TEXT,
+        categories TEXT,
+        url TEXT,
+        calories REAL NOT NULL,
+        protein REAL NOT NULL,
+        carbs REAL NOT NULL,
+        fat REAL NOT NULL
+      )
+    `);
+    statement = db.prepare(`
+      INSERT INTO meals (
+        name, chef, categories, url, calories, protein, carbs, fat
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    meals.forEach((meal) => {
+      statement.run([
+        meal.name,
+        meal.chef || null,
+        meal.categories || null,
+        meal.cookunity_url || null,
+        meal.calories,
+        meal.protein,
+        meal.carbs,
+        meal.fat,
+      ]);
+    });
+    return db.export();
+  } finally {
+    statement?.free();
+    db?.close();
+  }
+}
