@@ -88,6 +88,8 @@ const state = {
   aheadSheetFocus: false,
   calendarPage: 0,
   customMenuFile: null,
+  customMenuValidation: null,
+  customMenuRows: [],
 };
 
 const app = document.querySelector("#app");
@@ -215,6 +217,196 @@ function downloadMenuTemplate() {
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+const CUSTOM_MENU_COLUMNS = ["name", "chef", "categories", "cookunity_url", "calories", "protein", "carbs", "fat"];
+const CUSTOM_MENU_REQUIRED = ["name", "calories", "protein", "carbs", "fat"];
+
+function parseCsv(text) {
+  const rows = [];
+  let fields = [];
+  let field = "";
+  let quoted = false;
+  let line = 1;
+  let rowLine = 1;
+
+  const pushRow = () => {
+    rows.push({ fields, line: rowLine });
+    fields = [];
+    field = "";
+  };
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (char === '"') {
+        if (text[index + 1] === '"') {
+          field += '"';
+          index += 1;
+        } else {
+          quoted = false;
+        }
+      } else {
+        field += char;
+        if (char === "\n") line += 1;
+      }
+      continue;
+    }
+    if (char === '"' && field === "") {
+      quoted = true;
+    } else if (char === ",") {
+      fields.push(field);
+      field = "";
+    } else if (char === "\n") {
+      fields.push(field);
+      pushRow();
+      line += 1;
+      rowLine = line;
+    } else if (char === "\r") {
+      fields.push(field);
+      if (text[index + 1] === "\n") index += 1;
+      pushRow();
+      line += 1;
+      rowLine = line;
+    } else {
+      field += char;
+    }
+  }
+
+  if (quoted) throw new Error(`Row ${rowLine}: quoted field is not closed.`);
+  if (field || fields.length) {
+    fields.push(field);
+    pushRow();
+  }
+  return rows;
+}
+
+function normalizedCsvHeader(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isBlankCsvRow(fields) {
+  return fields.every((value) => !String(value || "").trim());
+}
+
+function validCookUnityUrl(value) {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:")
+      && (url.hostname === "cookunity.com" || url.hostname.endsWith(".cookunity.com"));
+  } catch {
+    return false;
+  }
+}
+
+function validateCustomMenuCsv(text) {
+  const rows = parseCsv(text.replace(/^\uFEFF/, ""));
+  const headerIndex = rows.findIndex(({ fields }) => {
+    const headers = fields.map(normalizedCsvHeader);
+    return headers.includes("name") && headers.some((header) => CUSTOM_MENU_COLUMNS.includes(header));
+  });
+  if (headerIndex < 0) {
+    return { errors: ["No header row found. Include the expected columns, such as name, calories, protein, carbs, and fat."], meals: [] };
+  }
+
+  const header = rows[headerIndex];
+  const headers = header.fields.map(normalizedCsvHeader);
+  const errors = [];
+  const positions = new Map();
+  headers.forEach((name, index) => {
+    if (!name) return;
+    if (positions.has(name)) {
+      errors.push(`Row ${header.line}, column "${name}": duplicate column name.`);
+    } else {
+      positions.set(name, index);
+    }
+    if (!CUSTOM_MENU_COLUMNS.includes(name)) {
+      errors.push(`Row ${header.line}, column "${name}": unsupported column.`);
+    }
+  });
+  CUSTOM_MENU_REQUIRED.forEach((name) => {
+    if (!positions.has(name)) errors.push(`Row ${header.line}: missing required column "${name}".`);
+  });
+  if (errors.some((error) => error.includes("missing required column"))) return { errors, meals: [] };
+
+  const meals = [];
+  rows.slice(headerIndex + 1).forEach(({ fields, line }) => {
+    if (isBlankCsvRow(fields)) return;
+    if (fields.length !== headers.length) {
+      errors.push(`Row ${line}: expected ${headers.length} fields, found ${fields.length}.`);
+      return;
+    }
+    const valueFor = (name) => fields[positions.get(name)]?.trim() || "";
+    const name = valueFor("name");
+    let rowIsValid = true;
+
+    if (!name) {
+      errors.push(`Row ${line}, column "name": meal name cannot be empty.`);
+      rowIsValid = false;
+    }
+
+    const meal = {
+      name,
+      chef: valueFor("chef"),
+      categories: valueFor("categories"),
+      cookunity_url: valueFor("cookunity_url"),
+    };
+
+    ["calories", "protein", "carbs", "fat"].forEach((column) => {
+      const raw = valueFor(column);
+      const value = Number(raw);
+      
+      if (!raw || !Number.isFinite(value) || value < 0) {
+          errors.push(
+            `Row ${line}, column "${column}": expected a finite non-negative number; received "${raw}".`
+          );
+          rowIsValid = false;
+      }else{
+        meal[column] = value;
+      }
+    });
+
+    const url = meal.cookunity_url;
+
+    if (url && !validCookUnityUrl(url)) {
+      errors.push(
+        `Row ${line}, column "cookunity_url": expected an HTTP or HTTPS CookUnity URL; received "${url}".`
+      );
+      rowIsValid = false;
+    }
+
+    if (rowIsValid) {
+      meals.push(meal);
+    }
+
+  });
+  if (!meals.length) errors.push("No valid meal rows found. Add at least one meal with a name and valid nutrition values.");
+  return { errors, meals };
+}
+
+async function validateCustomMenuFile() {
+  const file = state.customMenuFile;
+  if (!file) return;
+  try {
+    const result = validateCustomMenuCsv(await file.text());
+    if (state.customMenuFile !== file) return;
+
+    state.customMenuRows = result.errors.length
+      ? []
+      : result.meals;
+
+    state.customMenuValidation = result.errors.length
+      ? { ok: false, errors: result.errors }
+      : { ok: true, count: result.meals.length };
+  } catch (error) {
+    if (state.customMenuFile !== file) return;
+    state.customMenuRows = [];
+    state.customMenuValidation = {
+      ok: false,
+      errors: [error instanceof Error ? error.message : "The CSV could not be read or parsed."],
+    };
+  }
+  render();
 }
 
 function dedupePlans(plans) {
@@ -1597,9 +1789,15 @@ function renderHistory() {
 }
 
 function renderMenuManager() {
-    const filename = state.customMenuFile?.name || "No file selected.";
-
-  return `<div class="card">
+  const filename = state.customMenuFile?.name || "No file selected.";
+  const validation = state.customMenuValidation;
+  const feedback = validation?.ok
+    ? `<p class="quiet" aria-live="polite">Validated ${validation.count} meal row${validation.count === 1 ? "" : "s"}.</p>`
+    : validation
+      ? `<div class="warn" aria-live="polite"><p>We found a few things to fix:</p><ul>${validation.errors.map((error) => `<li>${esc(error)}</li>`).join("")}</ul></div>`
+      : "";
+  return `<section class="card">
+    <h2>Your Menu</h2>
     <p class="quiet">Download the CSV template, add your meals, then select your completed file here.</p>
     <div class="row">
       <button class="primary" type="button" data-action="download-menu-template">Download template</button>
@@ -1607,8 +1805,8 @@ function renderMenuManager() {
       <input id="customMenuFile" type="file" accept=".csv,text/csv" hidden>
     </div>
     <p class="quiet" aria-live="polite">${esc(filename)}</p>
-  </div>`;
-
+    ${feedback}
+  </section>`;
 }
 
 function renderPrefs() {
@@ -2562,7 +2760,10 @@ app.addEventListener("change",  (event) => {
 
   if (input.id === "customMenuFile") {
     state.customMenuFile = input.files?.[0] || null;
+    state.customMenuRows = [];
+    state.customMenuValidation = null;
     render();
+    validateCustomMenuFile();
     return;
   }
 
