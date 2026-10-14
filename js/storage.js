@@ -12,7 +12,9 @@ const KEYS = {
 
 const CUSTOM_MENU_DB_NAME = "samoora-custom-menu";
 const CUSTOM_MENU_STORE = "database";
+const CUSTOM_MENU_HISTORY_STORE = "history";
 const CUSTOM_MENU_KEY = "active";
+const CUSTOM_MENU_HISTORY_KEY = "menus";
 
 export function read(key, fallback) {
   try {
@@ -108,9 +110,11 @@ function openCustomMenuDatabase() {
       reject(new Error("This browser does not support local menu storage."));
       return;
     }
-    const request = globalThis.indexedDB.open(CUSTOM_MENU_DB_NAME, 1);
+    const request = globalThis.indexedDB.open(CUSTOM_MENU_DB_NAME, 2);
     request.onupgradeneeded = () => {
-      request.result.createObjectStore(CUSTOM_MENU_STORE);
+      const database = request.result;
+      if (!database.objectStoreNames.contains(CUSTOM_MENU_STORE)) database.createObjectStore(CUSTOM_MENU_STORE);
+      if (!database.objectStoreNames.contains(CUSTOM_MENU_HISTORY_STORE)) database.createObjectStore(CUSTOM_MENU_HISTORY_STORE);
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("Could not open local menu storage."));
@@ -123,8 +127,30 @@ export function saveCustomMenuBytes(bytes) {
     let database;
     try {
       database = await openCustomMenuDatabase();
-      const transaction = database.transaction(CUSTOM_MENU_STORE, "readwrite");
-      transaction.objectStore(CUSTOM_MENU_STORE).put(bytes.slice().buffer, CUSTOM_MENU_KEY);
+      const transaction = database.transaction([CUSTOM_MENU_STORE, CUSTOM_MENU_HISTORY_STORE], "readwrite");
+      const activeStore = transaction.objectStore(CUSTOM_MENU_STORE);
+      const historyStore = transaction.objectStore(CUSTOM_MENU_HISTORY_STORE);
+      const activeRequest = activeStore.get(CUSTOM_MENU_KEY);
+      const historyRequest = historyStore.get(CUSTOM_MENU_HISTORY_KEY);
+      let activeBytes;
+      let history;
+      let activeReady = false;
+      let historyReady = false;
+      const replaceActive = () => {
+        if (!activeReady || !historyReady) return;
+        if (activeBytes != null) historyStore.put([...history, activeBytes.slice(0)], CUSTOM_MENU_HISTORY_KEY);
+        activeStore.put(bytes.slice().buffer, CUSTOM_MENU_KEY);
+      };
+      activeRequest.onsuccess = () => {
+        activeBytes = activeRequest.result;
+        activeReady = true;
+        replaceActive();
+      };
+      historyRequest.onsuccess = () => {
+        history = Array.isArray(historyRequest.result) ? historyRequest.result : [];
+        historyReady = true;
+        replaceActive();
+      };
       transaction.oncomplete = () => {
         database.close();
         resolve();
@@ -165,6 +191,85 @@ export function loadCustomMenuBytes() {
       };
       transaction.onabort = () => {
         const error = transaction.error || new Error("The saved custom menu read was aborted.");
+        database.close();
+        reject(error);
+      };
+    } catch (error) {
+      database?.close();
+      reject(error);
+    }
+  });
+}
+
+export function loadCustomMenuHistoryBytes() {
+  return new Promise(async (resolve, reject) => {
+    let database;
+    try {
+      database = await openCustomMenuDatabase();
+      const transaction = database.transaction(CUSTOM_MENU_HISTORY_STORE, "readonly");
+      const request = transaction.objectStore(CUSTOM_MENU_HISTORY_STORE).get(CUSTOM_MENU_HISTORY_KEY);
+      request.onsuccess = () => {
+        const values = Array.isArray(request.result) ? request.result : [];
+        database.close();
+        resolve(values.map((value) => new Uint8Array(value)));
+      };
+      request.onerror = () => {
+        const error = request.error || new Error("The custom menu history could not be read.");
+        database.close();
+        reject(error);
+      };
+      transaction.onabort = () => {
+        const error = transaction.error || new Error("The custom menu history read was aborted.");
+        database.close();
+        reject(error);
+      };
+    } catch (error) {
+      database?.close();
+      reject(error);
+    }
+  });
+}
+
+export function removeCustomMenuBytes() {
+  return new Promise(async (resolve, reject) => {
+    let database;
+    try {
+      database = await openCustomMenuDatabase();
+      const transaction = database.transaction([CUSTOM_MENU_STORE, CUSTOM_MENU_HISTORY_STORE], "readwrite");
+      const activeStore = transaction.objectStore(CUSTOM_MENU_STORE);
+      const historyStore = transaction.objectStore(CUSTOM_MENU_HISTORY_STORE);
+      const activeRequest = activeStore.get(CUSTOM_MENU_KEY);
+      const historyRequest = historyStore.get(CUSTOM_MENU_HISTORY_KEY);
+      let activeBytes;
+      let history;
+      let activeReady = false;
+      let historyReady = false;
+      const moveActive = () => {
+        if (!activeReady || !historyReady || activeBytes == null) return;
+        historyStore.put([...history, activeBytes.slice(0)], CUSTOM_MENU_HISTORY_KEY);
+        activeStore.delete(CUSTOM_MENU_KEY);
+      };
+      activeRequest.onsuccess = () => {
+        activeBytes = activeRequest.result;
+        activeReady = true;
+        moveActive();
+      };
+      historyRequest.onsuccess = () => {
+        history = Array.isArray(historyRequest.result) ? historyRequest.result : [];
+        historyReady = true;
+        moveActive();
+      };
+      transaction.oncomplete = () => {
+        database.close();
+        resolve(activeBytes == null ? false : true);
+      };
+      transaction.onerror = () => {
+        const error = transaction.error || new Error("The custom menu could not be removed.");
+        database.close();
+        reject(error);
+      };
+      transaction.onabort = () => {
+        const error = transaction.error || new Error("The custom menu removal was aborted.");
         database.close();
         reject(error);
       };
